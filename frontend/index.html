@@ -11,9 +11,13 @@
       rel="stylesheet"
     />
     <script>
-      // Apply saved theme before first paint to avoid a flash of wrong theme.
+      // Apply the correct theme before first paint to avoid a flash of wrong theme.
       try {
-        var t = localStorage.getItem("theme");
+        var params = new URLSearchParams(window.location.search);
+        var t = params.get("theme");
+        if (t !== "light" && t !== "dark") {
+          t = localStorage.getItem("theme");
+        }
         if (t !== "light" && t !== "dark") {
           t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
         }
