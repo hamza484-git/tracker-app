@@ -53,16 +53,25 @@ class Trajectory:
     # scaling with the ball's speed. Keeps the filter from being too tight on
     # slow deliveries where the velocity-scaled slack alone would be tiny.
     _SOURCE_FILTER_MIN_RADIUS = 60
-    # Multiplier on the ball's current speed × frame gap. 2.0 = allow the ball
-    # to move at up to 2× its recent velocity before flagging as outlier.
-    _SOURCE_FILTER_SPEED_MULT = 2.0
+    # Hard cap on the tolerance envelope, so a large dt (missed frames)
+    # doesn't blow the envelope out to hundreds of pixels and let false
+    # positives sneak through. Deliberately tuned against a real failure case
+    # (job 29a5300e / redns3.mp4) where a fielder-shaped false positive at
+    # 200 px from the extrapolated position was passing the check.
+    _SOURCE_FILTER_MAX_RADIUS = 150
+    # Multiplier on the ball's current speed × frame gap. 1.5 = allow the ball
+    # to travel up to 1.5× its recent velocity before flagging as outlier.
+    _SOURCE_FILTER_SPEED_MULT = 1.5
     # Additive slack (px) on top of the velocity envelope — a fixed detection
     # jitter budget.
     _SOURCE_FILTER_PAD = 30
-    # Bat-zone escape hatch: even a far-off candidate is accepted if it lands
-    # within the calibrated bat zone plus this padding — the ball genuinely
-    # DOES jump when the bat deflects it, and that's what we want to catch.
-    _SOURCE_FILTER_BAT_ZONE_PAD = 50
+    # Bat-anchor escape hatch: the ball genuinely DOES teleport in screen
+    # coords when the bat deflects it, but the first post-impact detection
+    # HAS to land near where the bat physically is — right at bat_stump. A
+    # detection far from prediction AND far from bat_stump can't be a real
+    # deflection, so we reject it. This is a distance from a single anchor
+    # point (bat_stump), not a rectangular zone — tighter and simpler.
+    _SOURCE_FILTER_BAT_ANCHOR_RADIUS = 110
 
     def set_bat_zone(
         self,
@@ -79,15 +88,19 @@ class Trajectory:
         self._bat_zone_half_w = half_w
         self._bat_zone_half_h = half_h
 
-    def _is_within_bat_zone(self, cx: float, cy: float) -> bool:
-        if (self._bat_zone_cx is None or self._bat_zone_cy is None
-                or self._bat_zone_half_w is None
-                or self._bat_zone_half_h is None):
-            # No zone configured → be permissive so we don't over-reject.
+    def _near_bat_anchor(self, cx: float, cy: float) -> bool:
+        """Escape hatch for the source filter: is this candidate close enough
+        to the batter's stump position to plausibly BE the first frame of a
+        real bat deflection? Uses a radial distance (not a rectangle) around
+        (bat_zone_cx, bat_zone_cy) — that's the tightest sane definition.
+        When no calibration hint is available, err on the side of accepting."""
+        if self._bat_zone_cx is None or self._bat_zone_cy is None:
             return True
-        pad = self._SOURCE_FILTER_BAT_ZONE_PAD
-        return (abs(cx - self._bat_zone_cx) <= self._bat_zone_half_w + pad
-                and abs(cy - self._bat_zone_cy) <= self._bat_zone_half_h + pad)
+        dx = cx - self._bat_zone_cx
+        dy = cy - self._bat_zone_cy
+        return (dx * dx + dy * dy) ** 0.5 <= (
+            self._SOURCE_FILTER_BAT_ANCHOR_RADIUS + self._SOURCE_FILTER_PAD
+        )
 
     def _select_post_bounce_candidate(
         self,
@@ -121,9 +134,16 @@ class Trajectory:
         pred_y = y1 + vy * dt
 
         speed = (vx * vx + vy * vy) ** 0.5
-        max_dist = max(
-            self._SOURCE_FILTER_MIN_RADIUS,
-            speed * dt * self._SOURCE_FILTER_SPEED_MULT,
+        # Tolerance = min(hard cap, max(min radius, velocity envelope)) + pad.
+        # The hard cap is the key change vs the first cut of this filter —
+        # without it, a large dt (missed frames) inflated max_dist to
+        # ~250 px and let obvious false positives through.
+        max_dist = min(
+            self._SOURCE_FILTER_MAX_RADIUS,
+            max(
+                self._SOURCE_FILTER_MIN_RADIUS,
+                speed * dt * self._SOURCE_FILTER_SPEED_MULT,
+            ),
         ) + self._SOURCE_FILTER_PAD
 
         # Rank candidates by proximity to predicted position.
@@ -137,14 +157,18 @@ class Trajectory:
 
         if best_dist <= max_dist:
             return best
-        # Best candidate is far from extrapolated path. Only accept it if it
-        # plausibly landed at the bat — real deflection, not noise.
-        if self._is_within_bat_zone(bx, by):
+        # Best candidate is far from the extrapolated path. Only accept if it
+        # landed near the batter's stump position — real bat deflections have
+        # to originate from where the bat physically is.
+        if self._near_bat_anchor(bx, by):
             return best
         self._filter_rejects.append((
             frame_num, int(bx), int(by),
-            f"far {best_dist:.0f}>{max_dist:.0f} pred=({pred_x:.0f},{pred_y:.0f}) out of bat zone",
+            f"far {best_dist:.0f}>{max_dist:.0f} pred=({pred_x:.0f},{pred_y:.0f}) not near bat",
         ))
+        print(f"[SOURCE FILTER] Drop F{frame_num} ({int(bx)},{int(by)}) — "
+              f"{best_dist:.0f}px from pred ({pred_x:.0f},{pred_y:.0f}), "
+              f"cap {max_dist:.0f}, not near bat_stump")
         return None
 
     # Minimum velocity magnitude (px/frame) on both predicted and actual
