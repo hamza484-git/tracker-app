@@ -595,6 +595,41 @@ def process_video(
         - _STUMP_HEIGHT_M * (_bowl_crease_w / _RETURN_CREASE_M)
     )
 
+    # Bat zone at the batter's end — feeds the Trajectory source-level filter
+    # so it can accept true bat deflections while rejecting off-trajectory
+    # false-positive ball detections elsewhere in the frame. All values are
+    # in screen pixels. Any None → the filter's escape hatch is disabled and
+    # real deflections may be rejected as noise.
+    _bat_L_m = markers.get("bat_L"); _bat_R_m = markers.get("bat_R")
+    _bat_stump_m = markers.get("bat_stump")
+    _bat_zone_cx = (
+        (_bat_L_m[0] + _bat_R_m[0]) / 2 if _bat_L_m and _bat_R_m else None
+    )
+    _bat_zone_cy = None
+    _bat_zone_half_w_px = None
+    _bat_zone_half_h_px = None
+    if _bat_stump_m is not None and _bat_L_m and _bat_R_m:
+        _bat_crease_w = (
+            (_bat_R_m[0] - _bat_L_m[0]) ** 2 + (_bat_R_m[1] - _bat_L_m[1]) ** 2
+        ) ** 0.5
+        _bat_stump_h_px = _STUMP_HEIGHT_M * (_bat_crease_w / _RETURN_CREASE_M)
+        _bat_zone_cy = _bat_stump_m[1] - _bat_stump_h_px * 0.4
+        # Deliberately generous zone: the ball can meet the bat well outside
+        # the stump line (pull shots, wide edges). half_w = full crease width,
+        # half_h = 1.5× stump height. Feels large — remember this is only the
+        # ESCAPE HATCH for far-from-prediction detections; smooth in-line
+        # detections don't touch this check.
+        _bat_zone_half_w_px = _bat_crease_w
+        _bat_zone_half_h_px = _bat_stump_h_px * 1.5
+
+    def _apply_bat_zone(traj) -> None:
+        if hasattr(traj, "set_bat_zone"):
+            traj.set_bat_zone(
+                cx=_bat_zone_cx, cy=_bat_zone_cy,
+                half_w=_bat_zone_half_w_px, half_h=_bat_zone_half_h_px,
+            )
+    _apply_bat_zone(trajectory)
+
     def _run_pass1():
         nonlocal bounce_detector, release_detector, trajectory
         nonlocal detections_by_frame, ball_count, bat_count
@@ -602,6 +637,7 @@ def process_video(
         bounce_detector = BounceDetector()
         release_detector = ReleaseDetector()
         trajectory = Trajectory()
+        _apply_bat_zone(trajectory)
         detections_by_frame = {}
         ball_count = 0
         bat_count = 0
@@ -778,6 +814,7 @@ def process_video(
     bounce_detector = BounceDetector()
     release_detector = ReleaseDetector()
     trajectory = Trajectory()
+    _apply_bat_zone(trajectory)
 
     seg_a_end = (
         min(dev_f + 30, total - 1) if have_dev
@@ -836,6 +873,7 @@ def process_video(
         bounce_detector = BounceDetector()
         release_detector = ReleaseDetector()
         trajectory = Trajectory()
+        _apply_bat_zone(trajectory)
         release_detector.release = release
         bounce_detector.bounce_point = bounce
         trajectory._dir_changes = list(dev_changes)

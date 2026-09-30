@@ -19,6 +19,133 @@ class Trajectory:
         # Direction-change markers: list of (frame, x, y) where the ball's
         # horizontal velocity flipped against the predicted direction.
         self._dir_changes: list[tuple[int, int, int]] = []
+        # Optional bat-zone hint (populated by process.py after calibration).
+        # Used only by the source-level detection filter below to decide
+        # whether an off-trajectory candidate should still be accepted as a
+        # real bat deflection.
+        self._bat_zone_cx: Optional[float] = None
+        self._bat_zone_cy: Optional[float] = None
+        self._bat_zone_half_w: Optional[float] = None
+        self._bat_zone_half_h: Optional[float] = None
+        # Debug: reasons candidates were rejected. Not surfaced anywhere yet;
+        # useful when tuning thresholds against a specific problem clip.
+        self._filter_rejects: list[tuple[int, int, int, str]] = []
+
+    # --- Source-level detection filter (2026-09-30) ----------------------------
+    # Problem this solves: the ball detector occasionally scores a
+    # false-positive (helmet, shadow, dark pitch patch, kit) higher than the
+    # real ball on a given frame. Once that fake gets appended to _pts, every
+    # downstream detector — gap, parabolic, last-seen — treats it as truth,
+    # and the reported deviation lands wherever the false positive was.
+    #
+    # This filter runs INSIDE update() before a detection lands in _pts. It
+    # only kicks in post-bounce, once we have enough context (>= 3 accepted
+    # post-bounce points) to extrapolate an expected next position. From the
+    # multiple ball candidates the detector emitted this frame, it picks the
+    # one closest to that expected position. If even the best candidate is
+    # too far from the extrapolation AND lies outside the bat zone (so it's
+    # not a plausible deflection either), the whole frame is dropped.
+    #
+    # Kill-switch: set _ENABLE_SOURCE_FILTER = False to restore pre-filter
+    # behaviour with zero risk.
+    _ENABLE_SOURCE_FILTER = True
+    # Minimum radius (px) allowed around the extrapolated position, before
+    # scaling with the ball's speed. Keeps the filter from being too tight on
+    # slow deliveries where the velocity-scaled slack alone would be tiny.
+    _SOURCE_FILTER_MIN_RADIUS = 60
+    # Multiplier on the ball's current speed × frame gap. 2.0 = allow the ball
+    # to move at up to 2× its recent velocity before flagging as outlier.
+    _SOURCE_FILTER_SPEED_MULT = 2.0
+    # Additive slack (px) on top of the velocity envelope — a fixed detection
+    # jitter budget.
+    _SOURCE_FILTER_PAD = 30
+    # Bat-zone escape hatch: even a far-off candidate is accepted if it lands
+    # within the calibrated bat zone plus this padding — the ball genuinely
+    # DOES jump when the bat deflects it, and that's what we want to catch.
+    _SOURCE_FILTER_BAT_ZONE_PAD = 50
+
+    def set_bat_zone(
+        self,
+        cx: Optional[float],
+        cy: Optional[float],
+        half_w: Optional[float],
+        half_h: Optional[float],
+    ) -> None:
+        """Store the batter-end bat zone in pixel coords. Called by
+        process.py after calibration. All None → the source filter's escape
+        hatch is disabled (real deflections may then be rejected as noise)."""
+        self._bat_zone_cx = cx
+        self._bat_zone_cy = cy
+        self._bat_zone_half_w = half_w
+        self._bat_zone_half_h = half_h
+
+    def _is_within_bat_zone(self, cx: float, cy: float) -> bool:
+        if (self._bat_zone_cx is None or self._bat_zone_cy is None
+                or self._bat_zone_half_w is None
+                or self._bat_zone_half_h is None):
+            # No zone configured → be permissive so we don't over-reject.
+            return True
+        pad = self._SOURCE_FILTER_BAT_ZONE_PAD
+        return (abs(cx - self._bat_zone_cx) <= self._bat_zone_half_w + pad
+                and abs(cy - self._bat_zone_cy) <= self._bat_zone_half_h + pad)
+
+    def _select_post_bounce_candidate(
+        self,
+        candidates: list[tuple[dict, int, int]],
+        frame_num: int,
+        bounce_frame: int,
+    ) -> Optional[tuple[dict, int, int]]:
+        """Pick the best of several ball candidates for a post-bounce frame,
+        or return None if all of them look like false positives.
+
+        `candidates` is a list of (detection_dict, cx, cy). Pre-bounce or
+        with too few points of context we fall back to the highest-confidence
+        candidate, matching legacy behaviour.
+        """
+        # Post-bounce points already accepted into _pts.
+        post_bounce = [p for p in self._pts if p[0] >= bounce_frame]
+        # Not enough context to extrapolate → don't filter yet.
+        if len(post_bounce) < 3:
+            return max(candidates, key=lambda t: t[0].get("conf", 0.0))
+
+        # Linear velocity from the last two accepted points.
+        f0, x0, y0 = post_bounce[-2]
+        f1, x1, y1 = post_bounce[-1]
+        df = max(f1 - f0, 1)
+        vx = (x1 - x0) / df
+        vy = (y1 - y0) / df
+        dt = frame_num - f1
+        if dt <= 0:
+            return max(candidates, key=lambda t: t[0].get("conf", 0.0))
+        pred_x = x1 + vx * dt
+        pred_y = y1 + vy * dt
+
+        speed = (vx * vx + vy * vy) ** 0.5
+        max_dist = max(
+            self._SOURCE_FILTER_MIN_RADIUS,
+            speed * dt * self._SOURCE_FILTER_SPEED_MULT,
+        ) + self._SOURCE_FILTER_PAD
+
+        # Rank candidates by proximity to predicted position.
+        scored = sorted(
+            candidates,
+            key=lambda t: (t[1] - pred_x) ** 2 + (t[2] - pred_y) ** 2,
+        )
+        best = scored[0]
+        _, bx, by = best
+        best_dist = ((bx - pred_x) ** 2 + (by - pred_y) ** 2) ** 0.5
+
+        if best_dist <= max_dist:
+            return best
+        # Best candidate is far from extrapolated path. Only accept it if it
+        # plausibly landed at the bat — real deflection, not noise.
+        if self._is_within_bat_zone(bx, by):
+            return best
+        self._filter_rejects.append((
+            frame_num, int(bx), int(by),
+            f"far {best_dist:.0f}>{max_dist:.0f} pred=({pred_x:.0f},{pred_y:.0f}) out of bat zone",
+        ))
+        return None
 
     # Minimum velocity magnitude (px/frame) on both predicted and actual
     # sides before we consider deviation meaningful (filters jitter on a
@@ -108,9 +235,27 @@ class Trajectory:
         balls = [d for d in detections if d.get("class_name") == "ball"]
         if not balls:
             return
-        best = max(balls, key=lambda d: d["conf"])
-        cx = (best["x1"] + best["x2"]) // 2
-        cy = (best["y1"] + best["y2"]) // 2
+        # Compute the centre for each candidate up front so both paths share
+        # the same coord derivation.
+        candidates = [
+            (d, (d["x1"] + d["x2"]) // 2, (d["y1"] + d["y2"]) // 2)
+            for d in balls
+        ]
+
+        # Source-level filter: post-bounce only, and only if enabled. Otherwise
+        # keep legacy behaviour (pick the highest-confidence candidate).
+        if (self._ENABLE_SOURCE_FILTER
+                and bounce_frame is not None
+                and frame_num >= bounce_frame):
+            picked = self._select_post_bounce_candidate(
+                candidates, frame_num, bounce_frame,
+            )
+            if picked is None:
+                return  # all candidates look like false positives — drop frame
+            _, cx, cy = picked
+        else:
+            _, cx, cy = max(candidates, key=lambda t: t[0].get("conf", 0.0))
+
         self._pts.append((frame_num, cx, cy))
         self._check_direction_change(release_frame, bounce_frame)
 
