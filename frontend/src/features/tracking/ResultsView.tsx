@@ -16,6 +16,7 @@ export function ResultsView({ result }: { result: TrackingResult }) {
   const [showPitchingLine, setShowPitchingLine] = useState(true);
   const [showBallMarkers, setShowBallMarkers] = useState(true);
   const [showParabola, setShowParabola] = useState(true);
+  const [showPrediction, setShowPrediction] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
@@ -140,6 +141,11 @@ export function ResultsView({ result }: { result: TrackingResult }) {
             on={showParabola}
             onClick={() => setShowParabola((v) => !v)}
           />
+          <ToggleButton
+            label="Predicted path"
+            on={showPrediction}
+            onClick={() => setShowPrediction((v) => !v)}
+          />
         </div>
         <VideoPlayer
           ref={playerRef}
@@ -156,6 +162,7 @@ export function ResultsView({ result }: { result: TrackingResult }) {
               showPitchingLine={showPitchingLine}
               showBallMarkers={showBallMarkers}
               showParabola={showParabola}
+              showPrediction={showPrediction}
               currentTime={currentTime}
               ballType={result.ball_type}
             />

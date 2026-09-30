@@ -6,6 +6,10 @@ interface Props {
   showPitchingLine: boolean;
   showBallMarkers: boolean;
   showParabola: boolean;
+  /** Dotted "would-have-hit" line — extends bounce→deviation past the bat
+   *  toward the batter's stumps, showing where the ball would have gone if
+   *  the batsman had not made contact. */
+  showPrediction: boolean;
   /** Current playback time in seconds — markers / parabola animate as it advances. */
   currentTime: number;
   /** Which cricket_ball.png to use ('white' default, 'red' for red-ball jobs). */
@@ -292,6 +296,135 @@ function Parabolas({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Predicted trajectory — LBW-style "would-have-hit" projection past the bat.
+//
+// Geometry: the direction from bounce → deviation is the ball's actual
+// post-bounce path in screen space. To predict where the ball would have
+// gone, continue that same direction past deviation until it reaches the
+// batter's STUMP PLANE — the horizontal screen band at bail height above
+// bat_stump — rather than a fixed multiplier. The stump plane's screen
+// position is derived from the calibration (same pxPerM scale used by
+// StumpSet), so the endpoint is tied to the actual stumps drawn in the
+// overlay, not an arbitrary length.
+//
+// Hit/miss verdict: if the endpoint's x-coordinate lands within the stump
+// set's screen half-width around bat_stump.x, the ball would have hit — the
+// endpoint indicator turns red. Otherwise green (would have missed).
+//
+// Fallback: if the deviation point is already above the target stump-top y
+// (ball delivered high — bouncer, or hit on the way up), a short forward
+// projection is drawn instead so the intent is still visible.
+//
+// Only revealed once the animation has drawn the bounce→deviation segment
+// (bd == 1), so it appears at the moment of contact.
+// ─────────────────────────────────────────────────────────────────────────────
+const HIT_COLOR  = "#ff3b30";   // red — would have hit stumps
+const MISS_COLOR = "#8DFF3F";   // green — would have missed
+
+function PredictedPath({
+  result, currentTime,
+}: { result: TrackingResult; currentTime: number }) {
+  const { bounce, deviation } = result.events;
+  if (!bounce || !deviation) return null;
+
+  const phase = currentPhase(currentTime, result.segments);
+  if (phase === "before" || phase === "segA") return null;
+
+  const { bd } = parabolaProgress(currentTime, result.segments);
+  if (bd < 1) return null;
+
+  const dx = deviation.x - bounce.x;
+  const dy = deviation.y - bounce.y;
+  if (Math.abs(dx) < 1e-3 && Math.abs(dy) < 1e-3) return null;
+
+  // Stump-plane screen geometry, matching StumpSet's calculation exactly so
+  // the projection lines up with the drawn stumps.
+  const cal = result.calibration;
+  const bat_w = dist(cal.bat_L, cal.bat_R);
+  if (bat_w <= 0) return null;
+  const pxPerM = bat_w / RETURN_CREASE_M;
+  const stumpHeightPx     = STUMP_HEIGHT_M * pxPerM;
+  const halfStumpWidthPx  = (STUMP_SET_WIDTH / 2) * pxPerM;
+  const batStump = cal.bat_stump;
+
+  // Target: top of the drawn stumps (bail height). Camera behind bowler →
+  // batter's stumps at the TOP of frame → smaller screen-y is farther.
+  const targetY = batStump[1] - stumpHeightPx;
+
+  // Step 1 — locate the STUMP-PLANE CROSSING along the extended line. This is
+  // the point that determines hit vs miss. Requires the direction to actually
+  // carry the ball toward the target (positive t forward from deviation).
+  let hitX: number | null = null, hitY: number | null = null;
+  if (Math.abs(dy) > 1e-3) {
+    const t = (targetY - deviation.y) / dy;
+    if (t > 0.02) {
+      hitX = deviation.x + dx * t;
+      hitY = targetY;
+    }
+  }
+
+  // Step 2 — pick a VISUAL end for the dashed line so it reads as a
+  // trajectory rather than a pixel. The stump-plane crossing is often only a
+  // few px past deviation (ball is near bail height at contact), so we
+  // guarantee at least MIN_LINE_LEN of screen length forward. If the ball is
+  // moving mostly parallel to the stump plane (hit crossing near infinity),
+  // fall back to a fraction of segLen.
+  const segLen = Math.sqrt(dx * dx + dy * dy);
+  const ux = dx / segLen, uy = dy / segLen;
+  const MIN_LINE_LEN = Math.max(60, segLen * 0.35);
+  const distToStumpPlane = hitX != null && hitY != null
+    ? Math.sqrt((hitX - deviation.x) ** 2 + (hitY - deviation.y) ** 2)
+    : 0;
+  const lineLen = Math.max(distToStumpPlane, MIN_LINE_LEN);
+
+  // Clamp to frame edge so we never draw off-canvas.
+  const { width: W, height: H } = result.video;
+  const clampToEdge = (num: number, den: number): number => {
+    if (Math.abs(den) < 1e-9) return Infinity;
+    const t = num / den;
+    return t > 0 ? t : Infinity;
+  };
+  const maxLen = Math.min(
+    lineLen,
+    clampToEdge(0 - deviation.x, ux),
+    clampToEdge(W - deviation.x, ux),
+    clampToEdge(0 - deviation.y, uy),
+    clampToEdge(H - deviation.y, uy),
+  );
+  const endX = deviation.x + ux * maxLen;
+  const endY = deviation.y + uy * maxLen;
+
+  // Verdict is based on the STUMP-PLANE crossing, not the drawn line end.
+  const wouldHitStumps =
+    hitX != null && Math.abs(hitX - batStump[0]) <= halfStumpWidthPx;
+  const indicatorFill = wouldHitStumps ? HIT_COLOR : MISS_COLOR;
+
+  // Straight line — over the short bat→stumps distance (~1 m real-world),
+  // gravity's effect on the ball is negligible, so a straight extrapolation
+  // is the honest visualization. White dashes with a black border: two
+  // overlaid lines share the same dasharray + round linecap, so the thicker
+  // black stroke shows around each white dash as a halo.
+  return (
+    <g>
+      <line
+        x1={deviation.x} y1={deviation.y} x2={endX} y2={endY}
+        stroke="#000" strokeWidth={7} strokeOpacity={0.9}
+        strokeDasharray="10 8" strokeLinecap="round"
+      />
+      <line
+        x1={deviation.x} y1={deviation.y} x2={endX} y2={endY}
+        stroke="#fff" strokeWidth={4.5} strokeOpacity={1}
+        strokeDasharray="10 8" strokeLinecap="round"
+      />
+      {hitX != null && hitY != null && (
+        <circle cx={hitX} cy={hitY} r={9}
+                fill={indicatorFill} stroke="#000" strokeWidth={2.5} />
+      )}
+    </g>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Event markers (release / bounce / deviation)
 //   SEG A: progressive reveal at each event's source-frame timestamp.
 //   SEG B: all three visible throughout.
@@ -351,7 +484,7 @@ function BallMarkers({
 // ─────────────────────────────────────────────────────────────────────────────
 export function PitchOverlay({
   result, showStumps, showPitchingLine, showBallMarkers, showParabola,
-  currentTime, ballType = "white",
+  showPrediction, currentTime, ballType = "white",
 }: Props) {
   const { width, height } = result.video;
   const cal = result.calibration;
@@ -399,6 +532,9 @@ export function PitchOverlay({
       {showStumps && <StumpSet base={cal.bowl_stump} creaseW={bowl_w} />}
       {showBallMarkers && (
         <BallMarkers result={result} currentTime={currentTime} ballType={ballType} />
+      )}
+      {showPrediction && (
+        <PredictedPath result={result} currentTime={currentTime} />
       )}
     </svg>
   );
