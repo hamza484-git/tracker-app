@@ -88,6 +88,70 @@ class Trajectory:
         self._bat_zone_half_w = half_w
         self._bat_zone_half_h = half_h
 
+    # --- Post-detection deviation refinement (2026-09-30) ----------------------
+    # Fires AFTER all deviation detectors have run. Catches the case where the
+    # tracker holds the ball THROUGH a bat impact (no gap → gap detector
+    # doesn't fire) and the parabolic detector's fit spans the deflection, so
+    # its residuals only trip several frames post-impact. Result: recorded
+    # deviation sits 200+ px away from the bat, deep on the shot's path.
+    #
+    # The refinement is conservative: it only runs when the recorded deviation
+    # is clearly far from the bat (>_REFINE_MIN_CURR_DIST) AND there exists a
+    # post-bounce trajectory point that's genuinely close to it
+    # (<_REFINE_MAX_BAT_DIST). Otherwise the original detector output is left
+    # alone.
+    #
+    # Kill-switch: _ENABLE_DEVIATION_REFINE = False.
+    _ENABLE_DEVIATION_REFINE = True
+    _REFINE_MIN_CURR_DIST  = 130   # only refine if original is at least this far from bat
+    _REFINE_MAX_BAT_DIST   = 100   # only refine if a replacement point is at least this close
+
+    def refine_deviation_to_bat(self, bounce_frame: Optional[int]) -> None:
+        """If the currently recorded deviation is far from bat_stump, replace
+        it with the post-bounce trajectory point closest to bat_stump. No-op
+        when we lack a recorded deviation, calibration, or a close-enough
+        replacement."""
+        if not self._ENABLE_DEVIATION_REFINE:
+            return
+        if not self._dir_changes or bounce_frame is None:
+            return
+        if self._bat_zone_cx is None or self._bat_zone_cy is None:
+            return
+
+        curr_f, curr_x, curr_y = self._dir_changes[0]
+        curr_dist = (
+            (curr_x - self._bat_zone_cx) ** 2 + (curr_y - self._bat_zone_cy) ** 2
+        ) ** 0.5
+        if curr_dist <= self._REFINE_MIN_CURR_DIST:
+            return  # already close enough — nothing to fix
+
+        # Search post-bounce points (strictly after bounce_frame) for the one
+        # nearest bat_stump. Deduplicate per frame first — the same frame can
+        # appear if the detector recorded it twice.
+        by_frame: dict[int, tuple[int, int, int]] = {}
+        for f, x, y in self._pts:
+            if f > bounce_frame:
+                by_frame[f] = (f, x, y)
+        if not by_frame:
+            return
+
+        best = min(
+            by_frame.values(),
+            key=lambda p: (p[1] - self._bat_zone_cx) ** 2
+                        + (p[2] - self._bat_zone_cy) ** 2,
+        )
+        best_dist = (
+            (best[1] - self._bat_zone_cx) ** 2
+            + (best[2] - self._bat_zone_cy) ** 2
+        ) ** 0.5
+        if best_dist > self._REFINE_MAX_BAT_DIST:
+            return  # no candidate is close enough to be a plausible bat impact
+
+        print(f"[DEVIATION REFINE] Original F{curr_f} ({curr_x},{curr_y}) "
+              f"was {curr_dist:.0f}px from bat_stump — replacing with "
+              f"F{best[0]} ({best[1]},{best[2]}) at {best_dist:.0f}px")
+        self._dir_changes[0] = best
+
     def _near_bat_anchor(self, cx: float, cy: float) -> bool:
         """Escape hatch for the source filter: is this candidate close enough
         to the batter's stump position to plausibly BE the first frame of a

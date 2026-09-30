@@ -707,6 +707,12 @@ def process_video(
         trajectory.finalize_deviation(
             bounce[0], bat_line_x=_bat_x, bat_line_y=_bat_y,
         )
+        # If a detector fired but landed far from the bat — typically the
+        # parabolic residual detector taking several frames of accumulated
+        # divergence to trip AFTER a genuine hit — pull the deviation back
+        # to the trajectory point closest to the batter's stump position.
+        if hasattr(trajectory, "refine_deviation_to_bat"):
+            trajectory.refine_deviation_to_bat(bounce[0])
     dev_changes = list(trajectory._dir_changes)
     have_release = release is not None
     have_bounce = bounce is not None
