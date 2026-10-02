@@ -152,6 +152,151 @@ class Trajectory:
               f"F{best[0]} ({best[1]},{best[2]}) at {best_dist:.0f}px")
         self._dir_changes[0] = best
 
+    # --- Physics-based deviation prediction (2026-10-02) -----------------------
+    # Rationale: release and bounce events are highly reliable in this
+    # pipeline. The ball's post-bounce flight to the bat is a short, roughly
+    # straight segment in screen space (perspective + the small gravity drop
+    # over ~1 m world distance). We can therefore PREDICT where the ball
+    # arrives at the bat by linearly extrapolating the first few clean
+    # post-bounce detections to the bat-pad y-plane derived from calibration.
+    #
+    # This runs AFTER the normal detectors + refinement. Behaviour:
+    #   * If no detector fired → use the physics prediction outright.
+    #   * If a detector result exists and agrees with physics (within
+    #     _PHYSICS_AGREE_PX) → keep the detector result (frame-aligned,
+    #     more precise).
+    #   * If they disagree → the detector was fooled by post-impact noise;
+    #     overwrite with the physics prediction.
+    #
+    # Kill-switch: _ENABLE_PHYSICS_PREDICTION = False.
+    _ENABLE_PHYSICS_PREDICTION = True
+    # How many post-bounce detections to use for the fit. More = more
+    # smoothing but risks including post-impact points. 5 is a solid middle
+    # for 25-30 fps clips where bounce→bat spans ~5-10 frames.
+    _PHYSICS_FIT_MAX_POINTS = 5
+    # cos(angle) threshold — stop including detections once the direction
+    # changes by more than this. 0.7 ≈ 45° (ball probably hit something).
+    _PHYSICS_FIT_ANGLE_COS = 0.7
+    # Agreement tolerance between detector result and physics prediction.
+    _PHYSICS_AGREE_PX = 100
+
+    def predict_deviation_from_physics(
+        self,
+        bounce_frame: Optional[int],
+        bat_plane_y: Optional[float],
+    ) -> Optional[tuple[int, int, int]]:
+        """Extrapolate the first few clean post-bounce detections forward to
+        y = bat_plane_y using a linear fit of (f, x) and (f, y). Returns
+        (frame, x, y) or None if a prediction is not viable (too few points,
+        ball not moving toward target, extrapolation too far)."""
+        if (not self._ENABLE_PHYSICS_PREDICTION
+                or bounce_frame is None
+                or bat_plane_y is None):
+            return None
+
+        ordered = sorted(self._pts, key=lambda p: p[0])
+        # Deduplicate per frame (first seen wins — same as _pts update order).
+        seen_frames: set[int] = set()
+        post_bounce: list[tuple[int, int, int]] = []
+        for p in ordered:
+            if p[0] >= bounce_frame and p[0] not in seen_frames:
+                seen_frames.add(p[0])
+                post_bounce.append(p)
+        if len(post_bounce) < 2:
+            return None
+
+        # Grow a "clean" prefix: include a detection only while the direction
+        # from the previous one is roughly aligned with the direction before
+        # that. Big angle change → probably post-impact.
+        clean: list[tuple[int, int, int]] = [post_bounce[0]]
+        prev_dir: Optional[tuple[float, float]] = None
+        for p in post_bounce[1:]:
+            if len(clean) >= self._PHYSICS_FIT_MAX_POINTS:
+                break
+            f0, x0, y0 = clean[-1]
+            f1, x1, y1 = p
+            if f1 == f0:
+                continue
+            cur_dir = (float(x1 - x0), float(y1 - y0))
+            cur_mag = (cur_dir[0] ** 2 + cur_dir[1] ** 2) ** 0.5
+            if cur_mag < 1e-6:
+                continue
+            if prev_dir is not None:
+                prev_mag = (prev_dir[0] ** 2 + prev_dir[1] ** 2) ** 0.5
+                if prev_mag > 1e-6:
+                    cos_angle = (
+                        cur_dir[0] * prev_dir[0] + cur_dir[1] * prev_dir[1]
+                    ) / (cur_mag * prev_mag)
+                    if cos_angle < self._PHYSICS_FIT_ANGLE_COS:
+                        break  # direction change — stop including
+            clean.append(p)
+            prev_dir = cur_dir
+
+        if len(clean) < 2:
+            return None
+
+        # Linear fit of x(f) and y(f).
+        fs = np.array([p[0] for p in clean], dtype=float)
+        xs = np.array([p[1] for p in clean], dtype=float)
+        ys = np.array([p[2] for p in clean], dtype=float)
+        if len(np.unique(fs)) < 2:
+            return None
+        slope_x = float(np.polyfit(fs, xs, 1)[0])
+        slope_y = float(np.polyfit(fs, ys, 1)[0])
+
+        # Ball must be moving toward the target y-plane (vy and
+        # (bat_plane_y - y_last) must share sign).
+        y_last = float(ys[-1])
+        if abs(slope_y) < 0.1:
+            return None
+        delta_y = bat_plane_y - y_last
+        t_frames = delta_y / slope_y
+        if t_frames < -0.5:
+            # Ball is moving away from target — probably already past the
+            # bat line (short-of-length delivery with high bounce). Use the
+            # most recent in-plane point as a fallback.
+            return (int(clean[-1][0]), int(clean[-1][1]), int(clean[-1][2]))
+        # Guard against unphysical extrapolations (ball >30 frames post-bounce).
+        f_target = clean[-1][0] + t_frames
+        if f_target > bounce_frame + 30:
+            return None
+
+        x_target = float(xs[-1]) + slope_x * t_frames
+        return (int(round(f_target)), int(round(x_target)), int(round(bat_plane_y)))
+
+    def apply_physics_prediction(
+        self,
+        bounce_frame: Optional[int],
+        bat_plane_y: Optional[float],
+    ) -> None:
+        """Run predict_deviation_from_physics and reconcile with the current
+        _dir_changes result. See the comment block above for behaviour."""
+        if not self._ENABLE_PHYSICS_PREDICTION:
+            return
+        predicted = self.predict_deviation_from_physics(bounce_frame, bat_plane_y)
+        if predicted is None:
+            return
+        if not self._dir_changes:
+            # No detector fired — use the prediction outright.
+            self._dir_changes.append(predicted)
+            print(f"[DEVIATION PHYSICS] No detector result — using prediction "
+                  f"F{predicted[0]} ({predicted[1]},{predicted[2]})")
+            return
+        current = self._dir_changes[0]
+        dist = (
+            (current[1] - predicted[1]) ** 2
+            + (current[2] - predicted[2]) ** 2
+        ) ** 0.5
+        if dist > self._PHYSICS_AGREE_PX:
+            print(f"[DEVIATION PHYSICS] Detector F{current[0]} "
+                  f"({current[1]},{current[2]}) disagrees with prediction "
+                  f"F{predicted[0]} ({predicted[1]},{predicted[2]}) by "
+                  f"{dist:.0f}px — overwriting with prediction")
+            self._dir_changes[0] = predicted
+        else:
+            print(f"[DEVIATION PHYSICS] Detector agrees with prediction "
+                  f"(dist {dist:.0f}px) — keeping detector F{current[0]}")
+
     def _near_bat_anchor(self, cx: float, cy: float) -> bool:
         """Escape hatch for the source filter: is this candidate close enough
         to the batter's stump position to plausibly BE the first frame of a

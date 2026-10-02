@@ -713,6 +713,14 @@ def process_video(
         # to the trajectory point closest to the batter's stump position.
         if hasattr(trajectory, "refine_deviation_to_bat"):
             trajectory.refine_deviation_to_bat(bounce[0])
+        # Final layer — physics-based prediction. Projects the first few
+        # clean post-bounce detections to the bat-pad y-plane and uses that
+        # as the ground truth. If the detector result + refinement agrees
+        # with the prediction (within tolerance), the detector result wins
+        # (more frame-aligned). If they disagree, the detector was fooled
+        # and physics takes over.
+        if hasattr(trajectory, "apply_physics_prediction"):
+            trajectory.apply_physics_prediction(bounce[0], _bat_y)
     dev_changes = list(trajectory._dir_changes)
     have_release = release is not None
     have_bounce = bounce is not None
