@@ -351,11 +351,20 @@ function PredictedPath({
   // batter's stumps at the TOP of frame → smaller screen-y is farther.
   const targetY = batStump[1] - stumpHeightPx;
 
-  // Step 1 — locate the STUMP-PLANE CROSSING along the extended line. This is
-  // the point that determines hit vs miss. Requires the direction to actually
-  // carry the ball toward the target (positive t forward from deviation).
+  // Step 1 — locate the STUMP-PLANE CROSSING along the extended line. This
+  // is the point that determines hit vs miss. Three cases:
+  //   (a) deviation sits BELOW the stump-top line and the ball is moving UP
+  //       → forward-project to y = targetY (the normal case)
+  //   (b) deviation sits essentially AT or ABOVE the stump-top line already
+  //       (bail-height bat contact — common on short-of-length balls) →
+  //       use deviation itself as the impact point, don't try to project
+  //   (c) ball is moving horizontally or away from the target → no crossing
   let hitX: number | null = null, hitY: number | null = null;
-  if (Math.abs(dy) > 1e-3) {
+  const atOrAboveTarget = deviation.y <= targetY + 1;  // 1 px slop
+  if (atOrAboveTarget) {
+    hitX = deviation.x;
+    hitY = deviation.y;
+  } else if (Math.abs(dy) > 1e-3) {
     const t = (targetY - deviation.y) / dy;
     if (t > 0.02) {
       hitX = deviation.x + dx * t;
