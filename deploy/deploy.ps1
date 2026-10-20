@@ -20,7 +20,7 @@ param(
     [string] $Region        = "us-central1",
     [string] $Repo          = "tracker",
     [string] $Service       = "cricket-tracker",
-    [string] $Tag           = "v2",
+    [string] $Tag           = "v3-physics",
     [int]    $MinInstances  = 0
 )
 
@@ -64,7 +64,7 @@ gcloud run deploy $Service `
     --port=8080 `
     --no-allow-unauthenticated `
     --service-account=api-sa@$ProjectId.iam.gserviceaccount.com `
-    --set-env-vars="GCS_BUCKET=$Bucket,SIGNED_URL_TTL_SECONDS=3600,MAX_UPLOAD_MB=500,MAX_CLIP_SECONDS=30,IDLE_SHUTDOWN_SECONDS=300"
+    --set-env-vars="GCS_BUCKET=$Bucket,SIGNED_URL_TTL_SECONDS=3600,MAX_UPLOAD_MB=500,MAX_CLIP_SECONDS=30,IDLE_SHUTDOWN_SECONDS=300,TRACKER_REJECT_SHADOWS=1,TRACKER_USE_MAGNUS=1,TRACKER_USE_DRAG=1"
 
 if ($LASTEXITCODE -ne 0) { throw "Cloud Run deploy failed" }
 

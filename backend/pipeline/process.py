@@ -57,7 +57,17 @@ from .errors import (
     NoBallDetectedError,
     PipelineCancelled,
 )
+from .shadow_filter import reject_ball_shadows_legacy
 from .zones_classify import classify_bounce
+
+
+# Shadow rejection drops ball detections that are vertically aligned with
+# another in the same frame but lower in the image — the signature of a pitch
+# shadow being mis-detected as the ball. Rollback: set TRACKER_REJECT_SHADOWS=0.
+# See backend/pipeline/shadow_filter.py for the algorithm.
+_REJECT_SHADOWS = os.environ.get("TRACKER_REJECT_SHADOWS", "1").strip() not in (
+    "0", "false", "False", "FALSE", "no", "NO", ""
+)
 
 
 def get_session(weights_path: Path):
@@ -582,6 +592,7 @@ def process_video(
     detections_by_frame: dict[int, list] = {}
     ball_count = 0
     bat_count = 0
+    shadow_rejections_total = 0  # populated by the Pass-1 loop below
 
     # Stump-top y at bowler end — derived from calibration. ReleaseDetector
     # only sees ball candidates above this line; a real release happens at
@@ -625,6 +636,7 @@ def process_video(
     def _run_pass1():
         nonlocal bounce_detector, release_detector, trajectory
         nonlocal detections_by_frame, ball_count, bat_count
+        nonlocal shadow_rejections_total
         reset_filters()
         bounce_detector = BounceDetector()
         release_detector = ReleaseDetector()
@@ -633,6 +645,7 @@ def process_video(
         detections_by_frame = {}
         ball_count = 0
         bat_count = 0
+        shadow_rejections_total = 0
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         f = 0
         while True:
@@ -641,6 +654,12 @@ def process_video(
             if not ret:
                 break
             dets = detect_objects(session, frm, f)
+            if _REJECT_SHADOWS:
+                # Drop pitch-shadow false-positives before any downstream
+                # detector (release / bounce / trajectory) sees them. Non-ball
+                # detections pass through unchanged.
+                dets, n_rej = reject_ball_shadows_legacy(dets, f)
+                shadow_rejections_total += n_rej
             detections_by_frame[f] = dets
             if any(d["class_name"] == "ball" for d in dets):
                 ball_count += 1
@@ -1130,6 +1149,13 @@ def process_video(
             "frames_interpolated": int(frames_interpolated),
             "detection_rate": round(detection_rate, 4),
             "processing_time_sec": processing_time,
+        },
+        "diagnostics": {
+            # Count of ball detections dropped as pitch-shadow false-positives
+            # during Pass 1. 0 is the common case (detector didn't fire on
+            # shadows for this clip). Disable via TRACKER_REJECT_SHADOWS=0.
+            "shadow_rejections": int(shadow_rejections_total),
+            "shadow_rejection_enabled": bool(_REJECT_SHADOWS),
         },
         "warnings": [encoding_warning] if encoding_warning else [],
     }
