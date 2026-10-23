@@ -54,16 +54,19 @@ BALL_PIPELINES: dict[str, dict[str, Path]] = {
     },
     "red": {
         "legacy_dir": Path(os.environ.get("TRACKER_LEGACY_DIR_RED", _LEGACY_V8M)),
-        # Using redkaggle.onnx (YOLOv8m-P2 trained on redball_combined,
-        # mAP@0.5=0.97, mAP@0.5:0.95=0.59). Previous models still on disk:
-        # redsep.onnx and redball.onnx — swap the filename below to roll back.
+        # Using redsepv2.onnx (YOLOv8m-P2 trained on reddatav2/merged_dataset,
+        # 2026-09-27). Previous models still on disk (rollback by swapping
+        # filename below): redkaggle.onnx, redsep.onnx, redball.onnx.
         "weights": Path(os.environ.get(
-            "TRACKER_WEIGHTS_RED", str(_MODELS_DIR / "redkaggle.onnx"))),
+            "TRACKER_WEIGHTS_RED", str(_MODELS_DIR / "redsepv2.onnx"))),
     },
     "pink": {
         "legacy_dir": Path(os.environ.get("TRACKER_LEGACY_DIR_PINK", _LEGACY_V8M)),
+        # Using pinkoct.onnx (YOLO exported 2026-10-21 from pinkoct.pt,
+        # imgsz=1280, opset=12). Previous model still on disk (rollback by
+        # swapping filename below or setting TRACKER_WEIGHTS_PINK): pinkball.onnx.
         "weights": Path(os.environ.get(
-            "TRACKER_WEIGHTS_PINK", str(_MODELS_DIR / "pinkball.onnx"))),
+            "TRACKER_WEIGHTS_PINK", str(_MODELS_DIR / "pinkoct.onnx"))),
     },
 }
 
