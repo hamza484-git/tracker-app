@@ -1,0 +1,40 @@
+# Wicket consumer — pulls wicket windows from GCS, finds the delivery, runs the
+# tracker on a GPU, pushes the result back to GCS. Build context = repo root
+# (the folder containing backend/ and frontend/), because it needs both the
+# backend code/models and the frontend ball PNGs used by the overlay bake.
+#
+#   docker build -f Dockerfile.wicket -t wicket-consumer .
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 python3-pip libgl1 libglib2.0-0 ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
+
+WORKDIR /app
+
+# Same dependency set the GPU worker uses (onnxruntime-gpu, opencv, numpy,
+# scipy, imageio-ffmpeg, google-cloud-storage).
+COPY backend/worker/requirements.txt /app/worker/requirements.txt
+RUN pip install --no-cache-dir -r /app/worker/requirements.txt
+
+# Backend code: the consumer + its direct deps, the pipeline, and the legacy
+# tracker folders (white/red/pink) that pipeline.worker binds at runtime.
+COPY backend/storage.py backend/ball_pipelines.py backend/gcs_sync.py backend/wicket_consumer.py /app/
+COPY backend/pipeline /app/pipeline
+COPY backend/api /app/api
+COPY backend/worker /app/worker
+COPY backend/models /app/models
+# Coloured ball PNGs for the annotated-overlay bake.
+COPY frontend/public /app/ball_assets
+
+ENV PYTHONPATH=/app \
+    MODELS_DIR=/app/models \
+    LEGACY_ROOT=/app/worker/legacy \
+    TRACKER_BALL_ASSETS_DIR=/app/ball_assets \
+    WICKET_WORK_DIR=/data/wickets
+
+# The two bucket names and credentials are provided at run time (see
+# docker-compose.wicket.yml / WICKET_DEPLOYMENT.md). Nothing is baked in.
+CMD ["python", "wicket_consumer.py", "--interval", "5"]

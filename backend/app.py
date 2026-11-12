@@ -42,33 +42,9 @@ WORK_DIR = Path(os.environ.get("TRACKER_WORK_DIR", "./_tracker_work"))
 # this self-shutdown makes the L4 instance give itself up sooner. 0 disables.
 IDLE_SHUTDOWN_SECONDS = float(os.environ.get("IDLE_SHUTDOWN_SECONDS", "300"))
 
-# Per-ball-type pipeline: legacy tracker folder + ONNX weights. The folder is
-# bound inside each job's worker subprocess via TRACKER_LEGACY_DIR.
-_LEGACY_V8M = Path(__file__).resolve().parent / "worker" / "legacy" / "Zone-div_V8m"
-_MODELS_DIR = Path(__file__).resolve().parent / "models"
-BALL_PIPELINES: dict[str, dict[str, Path]] = {
-    "white": {
-        "legacy_dir": Path(os.environ.get("TRACKER_LEGACY_DIR_WHITE", _LEGACY_V8M)),
-        "weights": Path(os.environ.get(
-            "TRACKER_WEIGHTS_WHITE", str(_MODELS_DIR / "whiteball.onnx"))),
-    },
-    "red": {
-        "legacy_dir": Path(os.environ.get("TRACKER_LEGACY_DIR_RED", _LEGACY_V8M)),
-        # Using redsepv2.onnx (YOLOv8m-P2 trained on reddatav2/merged_dataset,
-        # 2026-09-27). Previous models still on disk (rollback by swapping
-        # filename below): redkaggle.onnx, redsep.onnx, redball.onnx.
-        "weights": Path(os.environ.get(
-            "TRACKER_WEIGHTS_RED", str(_MODELS_DIR / "redsepv2.onnx"))),
-    },
-    "pink": {
-        "legacy_dir": Path(os.environ.get("TRACKER_LEGACY_DIR_PINK", _LEGACY_V8M)),
-        # Using pinkoct.onnx (YOLO exported 2026-10-21 from pinkoct.pt,
-        # imgsz=1280, opset=12). Previous model still on disk (rollback by
-        # swapping filename below or setting TRACKER_WEIGHTS_PINK): pinkball.onnx.
-        "weights": Path(os.environ.get(
-            "TRACKER_WEIGHTS_PINK", str(_MODELS_DIR / "pinkoct.onnx"))),
-    },
-}
+# Per-ball-type pipeline (legacy tracker folder + ONNX weights) lives in
+# ball_pipelines.py so the wicket consumer uses the same models.
+from ball_pipelines import BALL_PIPELINES  # noqa: E402
 
 ACCEPTED_MIME = {
     "video/mp4", "video/quicktime", "video/x-msvideo", "video/avi",
