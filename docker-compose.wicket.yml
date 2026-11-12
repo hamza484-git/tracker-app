@@ -1,0 +1,37 @@
+# Wicket consumer — runs on the GPU server, independent of the scorecard
+# stack. It only talks to the two GCS buckets, so it needs no network link to
+# the clipper. Start with:
+#
+#   docker compose -f docker-compose.wicket.yml up -d --build
+#
+# Requires: an NVIDIA GPU + the NVIDIA container runtime, and credentials that
+# can read/write/delete objects in both buckets (the VM's service account, or
+# a key file mounted at /creds/key.json — see WICKET_DEPLOYMENT.md).
+services:
+  wicket-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.wicket
+    environment:
+      # The two wicket buckets.
+      WICKET_CLIPS_BUCKET: "${WICKET_CLIPS_BUCKET:-auto-wicket-clips}"
+      WICKET_TRACKED_BUCKET: "${WICKET_TRACKED_BUCKET:-auto-wicket-tracked}"
+      # Default ball colour when a match has no match.json yet.
+      WICKET_DEFAULT_BALL_TYPE: "${WICKET_DEFAULT_BALL_TYPE:-red}"
+      # Uncomment to authenticate with a mounted key instead of the VM's
+      # own service account:
+      # GOOGLE_APPLICATION_CREDENTIALS: /creds/key.json
+    # volumes:
+    #   - ./creds/key.json:/creds/key.json:ro
+    #   - wicket_data:/data          # optional: persist the local staging dir
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+# volumes:
+#   wicket_data:
