@@ -139,6 +139,22 @@ export interface FirstFrameResponse {
 
 export type BallType = "white" | "red" | "pink";
 
+/** One processed wicket in the live feed (GET /api/track/live/feed). */
+export interface LiveWicket {
+  prefix: string;
+  match_id: string;
+  innings: string;
+  over: string;
+  delivery_id: string;
+  state: string;
+  ball_type: BallType | null;
+  updated_at: string | null;
+  verdict: { decision: "OUT" | "NOT OUT"; would_hit_stumps: boolean } | null;
+  has_media: boolean;
+  thumbnail_url: string | null;
+  video_url: string | null;
+}
+
 export interface JobListItem {
   job_id: string;
   filename: string | null;

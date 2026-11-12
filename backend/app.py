@@ -25,7 +25,7 @@ from fastapi import (
     BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from jobs import JobStore, run_job
 from pipeline.errors import InvalidVideoError
@@ -455,6 +455,33 @@ def serve_local_file(job_id: str, filename: str):
         )
     )
     return FileResponse(p, media_type=media, filename=safe)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live wicket feed — processed wickets from the tracked store (GCS bucket in
+# prod, local folder in dev). See backend/wicket_feed.py.
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/api/track/live/feed")
+def live_feed(limit: int = 30):
+    import wicket_feed
+    limit = max(1, min(limit, 100))
+    return {"wickets": wicket_feed.list_recent(limit)}
+
+
+@app.get("/api/track/live/media/{full_path:path}")
+def live_media(full_path: str):
+    """Serve one wicket's thumbnail/video/json by its `{prefix}/{name}` path.
+    Keeps the private bucket behind the app (no public or signed URLs leak)."""
+    import wicket_feed
+    if "/" not in full_path:
+        raise HTTPException(status_code=404, detail="not found")
+    prefix, name = full_path.rsplit("/", 1)
+    ref = wicket_feed.resolve_media(prefix, name)
+    if ref is None:
+        raise HTTPException(status_code=404, detail="not found")
+    if ref["kind"] == "local":
+        return FileResponse(ref["path"], media_type=ref["ctype"])
+    return Response(content=ref["bytes"], media_type=ref["ctype"])
 
 
 @app.get("/api/track/health")

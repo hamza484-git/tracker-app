@@ -107,6 +107,16 @@ export async function listJobs(limit = 20): Promise<{ jobs: JobListItem[] }> {
   return jsonOrError(res);
 }
 
+export async function getLiveFeed(
+  limit = 30,
+  signal?: AbortSignal,
+): Promise<{ wickets: import("./types").LiveWicket[] }> {
+  // Open endpoint (no client scoping) — this is an operator-wide feed, and the
+  // media <img>/<video> tags can't send custom headers anyway.
+  const res = await fetch(`${API_BASE}/track/live/feed?limit=${limit}`, { signal });
+  return jsonOrError(res);
+}
+
 export async function cancelJob(jobId: string): Promise<{ job_id: string; status: string }> {
   const res = await fetch(`${API_BASE}/track/jobs/${jobId}/cancel`, {
     method: "POST",
