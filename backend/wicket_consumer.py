@@ -340,7 +340,8 @@ def process_wicket(wicket_dir: Path) -> str:
         ev = results.get("events", {})
         _status(prefix, state, ball_type=ball_type, scan_sec=scan_sec,
                 total_sec=round(time.time() - started, 1),
-                events_found={k: ev.get(k) is not None for k in ("release", "bounce", "deviation")})
+                events_found={k: ev.get(k) is not None for k in ("release", "bounce", "deviation")},
+                verdict=results.get("verdict"))
     else:
         state = "tracking_failed"
         _status(prefix, state, ball_type=ball_type, error=last_error,

@@ -1160,6 +1160,14 @@ def process_video(
         "warnings": [encoding_warning] if encoding_warning else [],
     }
 
+    # LBW-style OUT/NOT OUT verdict (a Python port of the frontend PredictedPath).
+    # Wrapped so a verdict bug can never fail an otherwise-good job.
+    try:
+        from .verdict import compute_verdict
+        results["verdict"] = compute_verdict(results)
+    except Exception:  # noqa: BLE001
+        results["verdict"] = None
+
     with open(output_dir / "results.json", "w") as f_out:
         json.dump(results, f_out, indent=2, sort_keys=True)
 

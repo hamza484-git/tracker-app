@@ -111,6 +111,21 @@ export interface TrackingResult {
     detection_rate: number;
     processing_time_sec: number;
   };
+  /** LBW-style projection verdict. Null when there is no bounce+deviation to
+   *  project from. Computed in backend/pipeline/verdict.py, which mirrors the
+   *  PredictedPath logic in PitchOverlay.tsx, so it matches what the overlay
+   *  draws. May be absent on older cached results.json files. */
+  verdict?: {
+    decision: "OUT" | "NOT OUT";
+    would_hit_stumps: boolean;
+    projected: boolean;
+    impact_x: number | null;
+    impact_y: number | null;
+    stump_center_x: number;
+    half_stump_width_px: number;
+    tolerance_factor: number;
+    direction_method: "trajectory_fit" | "bounce_to_deviation";
+  } | null;
 }
 
 export interface FirstFrameResponse {
