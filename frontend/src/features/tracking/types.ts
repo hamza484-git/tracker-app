@@ -149,6 +149,10 @@ export interface LiveWicket {
   state: string;
   ball_type: BallType | null;
   updated_at: string | null;
+  match_label?: string | null;
+  venue?: string | null;
+  batter?: string | null;
+  bowler?: string | null;
   verdict: { decision: "OUT" | "NOT OUT"; would_hit_stumps: boolean } | null;
   has_media: boolean;
   thumbnail_url: string | null;

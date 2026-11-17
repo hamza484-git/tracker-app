@@ -22,7 +22,7 @@ RUN npm run build
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 — runtime (CUDA + Python + backend)
 # ─────────────────────────────────────────────────────────────────────────────
-FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -61,6 +61,8 @@ RUN test -f /app/worker/legacy/Zone-div_V8m/tracker.py \
  && test -f /app/frontend_dist/index.html
 
 ENV TRACKER_WORK_DIR=/tmp/tracker_work \
+    WICKET_WORK_DIR=/tmp/wickets \
+    TRACKER_BALL_ASSETS_DIR=/app/frontend_dist \
     FRONTEND_DIST=/app/frontend_dist \
     PORT=8080 \
     SIGNED_URL_TTL_SECONDS=3600 \

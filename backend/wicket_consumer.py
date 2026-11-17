@@ -238,15 +238,53 @@ def process_wicket(wicket_dir: Path) -> str:
         raise Rejected("window.mp4 missing")
     if window.stat().st_size > MAX_WINDOW_BYTES:
         raise Rejected(f"window.mp4 is larger than {MAX_WINDOW_BYTES >> 20} MB")
+
+    # The clip arrives via the GCS client; the downloaded container sometimes
+    # won't open in OpenCV's bundled backend even though it's a valid file.
+    # ffprobe it (system ffmpeg) to confirm it's a real video, then remux into
+    # a clean container so OpenCV reads it reliably. Both are logged.
+    import subprocess as _sp
+    _probe = _sp.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "format=duration:stream=codec_name,width,height", "-of", "default=nw=1",
+         "-i", str(window)],
+        capture_output=True, text=True,
+    )
+    log("ffprobe", rc=_probe.returncode,
+        info=(_probe.stdout or _probe.stderr).replace("\n", " ").strip()[:200])
+    _fixed = wicket_dir / "window_fixed.mp4"
+    _rx = _sp.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(window),
+         "-c", "copy", "-movflags", "+faststart", str(_fixed)],
+        capture_output=True, text=True,
+    )
+    if _rx.returncode == 0 and _fixed.is_file() and _fixed.stat().st_size > 0:
+        window = _fixed
+    else:
+        log("remux failed", rc=_rx.returncode, err=(_rx.stderr or "").strip()[:200])
+
+    size = window.stat().st_size
+    # Validate like the web app's first-frame reader: actually READ a frame,
+    # don't trust CAP_PROP_FPS / FRAME_COUNT, which some OpenCV backends only
+    # populate after the first read (or report as 0 on otherwise-fine clips).
     cap = cv2.VideoCapture(str(window))
+    opened = cap.isOpened()
+    ret, frame = cap.read()
     fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
     n_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
-    w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or (frame.shape[1] if ret and frame is not None else 0)
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or (frame.shape[0] if ret and frame is not None else 0)
     cap.release()
-    if fps <= 0 or n_frames <= 0 or w <= 0 or h <= 0:
-        raise Rejected("window.mp4 is not a readable video")
-    if max(w, h) > MAX_FRAME_SIDE or n_frames / fps > MAX_WINDOW_SEC:
-        raise Rejected(f"window is too large ({w}x{h}, {n_frames / fps:.0f}s)")
+    log("window probe", size=size, opened=opened, read=bool(ret),
+        fps=round(fps, 2), n_frames=n_frames, w=w, h=h)
+    if not ret or w <= 0 or h <= 0:
+        raise Rejected(f"window.mp4 is not a readable video "
+                       f"(opened={opened} read={bool(ret)} size={size})")
+    if fps <= 0:
+        fps = 30.0  # some backends don't report fps; find_delivery recomputes it
+    dur = (n_frames / fps) if (n_frames > 0 and fps > 0) else 0.0
+    if max(w, h) > MAX_FRAME_SIDE or (dur and dur > MAX_WINDOW_SEC):
+        raise Rejected(f"window is too large ({w}x{h}, {dur:.0f}s)")
     started = time.time()
 
     ball_type = _ball_type(match_id)
@@ -493,6 +531,37 @@ def main(argv=None) -> int:
         for prefix, state in run_once().items():
             print(f"{state:20s} {prefix}")
         return 0
+
+    # Cloud Run sets $PORT: serve a health endpoint and poll in a background
+    # thread so the instance stays alive (min-instances=1, no CPU throttling).
+    port = os.environ.get("PORT")
+    if port:
+        import threading
+        import http.server
+
+        def _loop():
+            while True:
+                try:
+                    run_once()
+                except Exception as e:  # noqa: BLE001 — never let the poller die
+                    log("run_once error", error=e)
+                time.sleep(args.interval)
+
+        threading.Thread(target=_loop, daemon=True).start()
+
+        class _H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true,"service":"wicket-consumer"}')
+
+            def log_message(self, *a):  # quiet
+                pass
+
+        http.server.HTTPServer(("0.0.0.0", int(port)), _H).serve_forever()
+        return 0
+
     # Wickets waiting on a calibration are retried each pass; only log once.
     while True:
         run_once()

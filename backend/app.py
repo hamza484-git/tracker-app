@@ -96,6 +96,30 @@ def _idle_watchdog() -> None:
 if IDLE_SHUTDOWN_SECONDS > 0:
     threading.Thread(target=_idle_watchdog, daemon=True).start()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional in-process wicket consumer. When WICKET_RUN_CONSUMER is set, this
+# process also polls the clips bucket, tracks deliveries on the GPU, and writes
+# results to the tracked bucket — used by the dedicated `wicket-consumer` Cloud
+# Run service, which runs this same image via uvicorn (proven startup + GPU).
+# ─────────────────────────────────────────────────────────────────────────────
+if os.environ.get("WICKET_RUN_CONSUMER", "").strip() not in ("", "0", "false", "False", "no"):
+    def _wicket_consumer_loop() -> None:
+        import time as _t
+        import traceback
+        import wicket_consumer as _wc
+        interval = float(os.environ.get("WICKET_INTERVAL", "5"))
+        print("[wicket-consumer] in-process consumer loop started", flush=True)
+        while True:
+            try:
+                _wc.run_once()
+            except Exception:  # noqa: BLE001 — never let the poller die
+                traceback.print_exc()
+            _t.sleep(interval)
+
+    threading.Thread(target=_wicket_consumer_loop, daemon=True).start()
+
+
 # Upload area for first-frame extraction, awaiting /analyze.
 _uploads_root: Path = (
     storage.upload_dir() if isinstance(storage, LocalStorage)

@@ -109,7 +109,7 @@ def pull_new_windows(incoming_dir: Path) -> list[str]:
             win = bucket.blob(f"{base}{prefix}/window.mp4")
             if not win.exists():
                 continue                      # meta without window — ignore
-            win.download_to_filename(str(local / "window.mp4.part"))
+            win.download_to_filename(str(local / "window.mp4.part"), raw_download=True)
             os.replace(local / "window.mp4.part", local / "window.mp4")
             meta_blob.download_to_filename(str(local / "meta.json.part"))
             os.replace(local / "meta.json.part", local / "meta.json")

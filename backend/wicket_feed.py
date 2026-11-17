@@ -70,6 +70,10 @@ def _item(prefix: str, status: dict) -> dict:
         "state": state,
         "ball_type": status.get("ball_type"),
         "updated_at": status.get("updated_at"),
+        "match_label": status.get("match_label"),
+        "venue": status.get("venue"),
+        "batter": status.get("batter"),
+        "bowler": status.get("bowler"),
         "verdict": None if not v else {
             "decision": v.get("decision"),
             "would_hit_stumps": v.get("would_hit_stumps"),
